@@ -24,18 +24,21 @@ requires = [
     "tomlkit",
     "datasette",
     "--extra-index-url=https://temoaproject.github.io/temoa-nightlies/simple/",
-    "temoa==4.0.0a1.dev20251127"
+    "temoa==4.0.0a1.dev20251214"
 ]
 test_requires = [
     "pytest",
 ]
 
 [tool.briefcase.app.temoainterface.macOS]
-universal_build = true
+universal_build = false
 requires = [
     "toga-cocoa~=0.5.0",
     "std-nslog~=1.0.3",
 ]
+
+# Tell pip it is allowed to install macOS 12 wheels
+requirement_installer_args = ["--platform", "macosx_12_0_arm64"]
 
 [tool.briefcase.app.temoainterface.linux]
 requires = [
