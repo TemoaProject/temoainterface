@@ -1,4 +1,5 @@
 import os
+import sys
 import socket
 import contextlib
 
@@ -93,7 +94,7 @@ class DatasetteServer:
         return f"http://127.0.0.1:{self.port}"
 
 
-# --- Custom Logging Handler ---
+# --- Custom Logging & Stream Handler ---
 class TogaLogHandler(logging.Handler):
     def __init__(self, app, log_widget):
         super().__init__()
@@ -108,6 +109,26 @@ class TogaLogHandler(logging.Handler):
         self.app.loop.call_soon_threadsafe(self._append_text, msg + "\n")
 
     def _append_text(self, text):
+        self.log_widget.value += text
+        self.log_widget.scroll_to_bottom()
+
+
+class StreamRedirector:
+    """Redirects stdout/stderr writes to the Toga log widget."""
+
+    def __init__(self, app, log_widget, prefix=""):
+        self.app = app
+        self.log_widget = log_widget
+        self.prefix = prefix
+
+    def write(self, text):
+        if text.strip():  # Avoid logging empty newlines aggressively
+            self.app.loop.call_soon_threadsafe(self._append, f"{self.prefix}{text}")
+
+    def flush(self):
+        pass
+
+    def _append(self, text):
         self.log_widget.value += text
         self.log_widget.scroll_to_bottom()
 
@@ -205,12 +226,10 @@ class TemoaGUI(toga.App):
             url="https://temoaproject.org", style=Pack(flex=1)
         )
 
-        # Create Navigation Toolbar for WebView
         nav_box = toga.Box(
             style=Pack(direction=ROW, margin_bottom=5, align_items="center")
         )
 
-        # FIX: Use JavaScript for navigation since native API isn't exposed
         self.btn_back = toga.Button(
             "Back",
             on_press=lambda w: self.db_webview.evaluate_javascript("history.back()"),
@@ -324,9 +343,17 @@ class TemoaGUI(toga.App):
         await asyncio.to_thread(self._execute_temoa_logic)
 
     def _execute_temoa_logic(self):
+        # FIX FOR WINDOWS: Redirect stderr/stdout so they aren't None
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+
+        sys.stdout = StreamRedirector(self.app, self.log_view, prefix="")
+        sys.stderr = StreamRedirector(self.app, self.log_view, prefix="[STDERR] ")
+
         root_logger = logging.getLogger()
         gui_handler = TogaLogHandler(self.app, self.log_view)
         root_logger.addHandler(gui_handler)
+
         logging.getLogger("temoa").setLevel(logging.INFO)
         logging.getLogger("pyomo").setLevel(logging.WARNING)
         logging.getLogger("matplotlib").setLevel(logging.WARNING)
@@ -374,7 +401,11 @@ class TemoaGUI(toga.App):
             self.app.loop.call_soon_threadsafe(self._append_log, f"\nERROR:\n{tb}\n")
 
         finally:
+            # RESTORE STREAMS and Handlers
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
             root_logger.removeHandler(gui_handler)
+
             self.app.loop.call_soon_threadsafe(
                 self._on_run_complete, success, final_output_path
             )
