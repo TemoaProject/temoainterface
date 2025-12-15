@@ -21,6 +21,10 @@ test_sources = [
 ]
 
 requires = [
+    "tomlkit",
+    "datasette",
+    "--extra-index-url=https://temoaproject.github.io/temoa-nightlies/simple/",
+    "temoa==4.0.0a1.dev20251127"
 ]
 test_requires = [
     "pytest",

@@ -1,4 +1,6 @@
 import os
+import socket
+import contextlib
 
 # --- CRITICAL LINUX FIX ---
 if os.name == "posix":
@@ -18,6 +20,9 @@ from toga.style.pack import COLUMN, ROW
 from temoa._internal.temoa_sequencer import TemoaSequencer
 from temoa.core.config import TemoaConfig
 
+# --- Datasette Imports ---
+from datasette.app import Datasette
+
 # --- Constants ---
 MODES = [
     "perfect_foresight",
@@ -36,7 +41,6 @@ TIME_SEQUENCES = [
     "manual",
 ]
 
-# Enable plotting by default so the WebView has something to show
 DEFAULT_TOML_TEMPLATE = """
 scenario = "gui_run"
 scenario_mode = "perfect_foresight"
@@ -47,6 +51,46 @@ price_check = true
 source_trace = true
 plot_commodity_network = true
 """
+
+
+# --- Helper: Find Free Port ---
+def find_free_port():
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        s.bind(("", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return s.getsockname()[1]
+
+
+# --- Datasette Manager ---
+class DatasetteServer:
+    """Manages a background Datasette instance for the GUI."""
+
+    def __init__(self):
+        self.server_task = None
+        self.port = None
+        self.running = False
+
+    async def start(self, db_path: Path):
+        """Starts Datasette serving the given database file."""
+        if self.running:
+            return f"http://127.0.0.1:{self.port}"
+
+        self.port = find_free_port()
+        self.running = True
+
+        ds = Datasette(files=[str(db_path)], immutables=[], settings={"base_url": "/"})
+
+        import uvicorn
+
+        config = uvicorn.Config(
+            ds.app(), host="127.0.0.1", port=self.port, log_level="error"
+        )
+        server = uvicorn.Server(config)
+
+        self.server_task = asyncio.create_task(server.serve())
+        await asyncio.sleep(0.5)
+
+        return f"http://127.0.0.1:{self.port}"
 
 
 # --- Custom Logging Handler ---
@@ -73,9 +117,9 @@ class TemoaGUI(toga.App):
         # --- State ---
         self.source_path: Path | None = None
         self.toml_doc: tomlkit.TOMLDocument | None = None
+        self.ds_server = DatasetteServer()
 
         # --- UI Layout ---
-        # Main padding for the whole input area
         input_box = toga.Box(style=Pack(direction=COLUMN, margin=15))
 
         # 1. File Selection
@@ -89,7 +133,6 @@ class TemoaGUI(toga.App):
             "Browse", on_press=self.select_file, style=Pack(width=90)
         )
 
-        # Label for file input
         input_box.add(
             toga.Label("Input Source", style=Pack(margin_bottom=5, font_weight="bold"))
         )
@@ -105,37 +148,25 @@ class TemoaGUI(toga.App):
         )
 
         # 2. Configuration Grid
-        # We use a helper function to create consistent "Label Above Field" columns
         def build_field(label_text, widget, right_margin=0):
-            # Container for the field
             box = toga.Box(
                 style=Pack(direction=COLUMN, flex=1, margin_right=right_margin)
             )
-            # Label styled to be small and above
             label = toga.Label(
                 label_text, style=Pack(margin_bottom=3, font_size=8, color="#666666")
             )
-            # Ensure widget stretches
             widget.style.flex = 1
             box.add(label)
             box.add(widget)
             return box
 
-        # Grid Row 1
         row_a = toga.Box(style=Pack(direction=ROW, margin_bottom=15))
-
-        # Mode Selection
         self.mode_select = toga.Selection(items=MODES)
-        # Solver Selection
         self.solver_select = toga.Selection(items=SOLVERS)
-
-        # Add to Row A with spacing
         row_a.add(build_field("SCENARIO MODE", self.mode_select, right_margin=20))
         row_a.add(build_field("SOLVER", self.solver_select))
 
-        # Grid Row 2
         row_b = toga.Box(style=Pack(direction=ROW, margin_bottom=20))
-        # Time Sequencing
         self.time_select = toga.Selection(items=TIME_SEQUENCES)
         row_b.add(build_field("TIME SEQUENCING", self.time_select))
 
@@ -143,7 +174,7 @@ class TemoaGUI(toga.App):
         input_box.add(row_b)
 
         # Run Button Area
-        run_box = toga.Box(style=Pack(direction=ROW, alignment="center"))
+        run_box = toga.Box(style=Pack(direction=ROW, align_items="center"))
         self.btn_run = toga.Button(
             "RUN MODEL",
             on_press=self.run_model,
@@ -158,14 +189,61 @@ class TemoaGUI(toga.App):
 
         # 3. Output Tabs
         self.content_container = toga.OptionContainer(style=Pack(flex=1))
+
+        # Tab 1: Logs
         self.log_view = toga.MultilineTextInput(
             readonly=True, style=Pack(flex=1, font_family="monospace")
         )
 
-        self.webview = toga.WebView(url="https://temoaproject.org", style=Pack(flex=1))
+        # Tab 2: Visual Report
+        self.report_webview = toga.WebView(
+            url="https://temoaproject.org", style=Pack(flex=1)
+        )
+
+        # Tab 3: Database Inspector
+        self.db_webview = toga.WebView(
+            url="https://temoaproject.org", style=Pack(flex=1)
+        )
+
+        # Create Navigation Toolbar for WebView
+        nav_box = toga.Box(
+            style=Pack(direction=ROW, margin_bottom=5, align_items="center")
+        )
+
+        # FIX: Use JavaScript for navigation since native API isn't exposed
+        self.btn_back = toga.Button(
+            "Back",
+            on_press=lambda w: self.db_webview.evaluate_javascript("history.back()"),
+            style=Pack(width=60, margin_right=5),
+        )
+
+        self.btn_fwd = toga.Button(
+            "Forward",
+            on_press=lambda w: self.db_webview.evaluate_javascript("history.forward()"),
+            style=Pack(width=70, margin_right=5),
+        )
+
+        self.btn_reload = toga.Button(
+            "Reload",
+            on_press=lambda w: self.db_webview.evaluate_javascript("location.reload()"),
+            style=Pack(width=70),
+        )
+
+        nav_box.add(self.btn_back)
+        nav_box.add(self.btn_fwd)
+        nav_box.add(self.btn_reload)
+
+        db_container = toga.Box(style=Pack(direction=COLUMN, margin=10))
+        db_container.add(nav_box)
+        db_container.add(self.db_webview)
 
         self.content_container.content.append(toga.OptionItem("Logs", self.log_view))
-        self.content_container.content.append(toga.OptionItem("Report", self.webview))
+        self.content_container.content.append(
+            toga.OptionItem("Visual Report", self.report_webview)
+        )
+        self.content_container.content.append(
+            toga.OptionItem("Database Inspector", db_container)
+        )
 
         # Main Window
         main_box = toga.Box(style=Pack(direction=COLUMN))
@@ -181,7 +259,9 @@ class TemoaGUI(toga.App):
     async def select_file(self, widget):
         try:
             fname = await self.main_window.dialog(
-                toga.OpenFileDialog(title="Select Input", file_types=["toml", "sqlite"])
+                toga.OpenFileDialog(
+                    title="Select Input", file_types=["toml", "sqlite", "db", "dat"]
+                )
             )
             if fname:
                 self.source_path = fname
@@ -193,7 +273,7 @@ class TemoaGUI(toga.App):
 
     def _load_config_logic(self, path: Path):
         try:
-            if path.suffix in [".sqlite"]:
+            if path.suffix in [".sqlite", ".db"]:
                 self.toml_doc = tomlkit.parse(DEFAULT_TOML_TEMPLATE)
                 self.toml_doc["input_database"] = str(path.absolute())
                 self.toml_doc["output_database"] = str(path.absolute())
@@ -208,7 +288,6 @@ class TemoaGUI(toga.App):
                             abs_p = (path.parent / p).resolve()
                             self.toml_doc[db_key] = str(abs_p)
 
-            # Update UI
             if "scenario_mode" in self.toml_doc:
                 val = self.toml_doc["scenario_mode"]
                 if val in MODES:
@@ -311,13 +390,14 @@ class TemoaGUI(toga.App):
         if success and output_path:
             self.log_view.value += "\n✅ Optimization Complete.\n"
 
+            # 1. Handle Visual Report (SVG/HTML)
             html_files = list(output_path.glob("*.html"))
             svg_files = list(output_path.glob("*.svg"))
 
             if html_files:
                 try:
                     content = html_files[0].read_text(encoding="utf-8")
-                    self.webview.set_content(
+                    self.report_webview.set_content(
                         f"file://{html_files[0].absolute()}", content
                     )
                     self.content_container.current_tab = 1
@@ -327,7 +407,7 @@ class TemoaGUI(toga.App):
                 try:
                     svg_content = svg_files[0].read_text(encoding="utf-8")
                     html_wrapper = f"<html><body>{svg_content}</body></html>"
-                    self.webview.set_content(
+                    self.report_webview.set_content(
                         f"file://{svg_files[0].absolute()}", html_wrapper
                     )
                     self.content_container.current_tab = 1
@@ -335,8 +415,32 @@ class TemoaGUI(toga.App):
                     self.log_view.value += f"\nError loading SVG content: {e}"
             else:
                 self.log_view.value += "No visual report found in output directory."
+
+            # 2. Handle Database Inspector
+            sqlite_files = list(output_path.glob("*.sqlite"))
+            if sqlite_files:
+                db_path = sqlite_files[0]
+                self.log_view.value += (
+                    f"\nLaunching Database Inspector for: {db_path.name}...\n"
+                )
+                asyncio.create_task(self._launch_datasette(db_path))
+            else:
+                db_path_str = self.toml_doc.get("output_database")
+                if db_path_str:
+                    db_path = Path(db_path_str)
+                    if db_path.exists():
+                        asyncio.create_task(self._launch_datasette(db_path))
+
         else:
             self.log_view.value += "\n❌ Optimization Failed. See logs above."
+
+    async def _launch_datasette(self, db_path):
+        try:
+            url = await self.ds_server.start(db_path)
+            self.db_webview.url = url
+            self.log_view.value += f"Database Inspector ready at {url}\n"
+        except Exception as e:
+            self.log_view.value += f"\nFailed to start Datasette: {e}\n"
 
 
 def main():
