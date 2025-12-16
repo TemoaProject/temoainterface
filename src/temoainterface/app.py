@@ -175,80 +175,73 @@ class TemoaGUI(toga.App):
         self.source_path: Path | None = None
         self.toml_doc: tomlkit.TOMLDocument | None = None
         self.ds_server = DatasetteServer()
-        self.static_server = StaticFileServer() # NEW: Static server
+        self.static_server = StaticFileServer()
 
-        # --- UI Layout ---
-        input_box = toga.Box(style=Pack(direction=COLUMN, margin=15))
+        # ==========================
+        # LEFT SIDEBAR: Configuration
+        # ==========================
+        sidebar_box = toga.Box(style=Pack(direction=COLUMN, padding=10))
 
-        file_row = toga.Box(style=Pack(direction=ROW, margin_bottom=15))
+        # 1. Header
+        sidebar_box.add(toga.Label("CONFIGURATION", style=Pack(font_weight="bold", margin_bottom=10)))
+
+        # 2. Input File
+        sidebar_box.add(toga.Label("Input Source:", style=Pack(margin_bottom=2, font_size=9)))
         self.path_input = toga.TextInput(
             readonly=True,
-            placeholder="Select .toml config or .sqlite database...",
-            style=Pack(flex=1, margin_right=10),
+            placeholder="Select file...",
+            style=Pack(margin_bottom=5)
         )
-        btn_browse = toga.Button(
-            "Browse", on_press=self.select_file, style=Pack(width=90)
-        )
+        btn_browse = toga.Button("Browse...", on_press=self.select_file)
 
-        input_box.add(
-            toga.Label("Input Source", style=Pack(margin_bottom=5, font_weight="bold"))
-        )
-        file_row.add(self.path_input)
-        file_row.add(btn_browse)
-        input_box.add(file_row)
+        sidebar_box.add(self.path_input)
+        sidebar_box.add(btn_browse)
+        sidebar_box.add(toga.Divider(style=Pack(margin_top=15, margin_bottom=15)))
 
-        input_box.add(toga.Divider(style=Pack(margin_bottom=15)))
-        input_box.add(
-            toga.Label(
-                "Settings Override", style=Pack(margin_bottom=10, font_weight="bold")
-            )
-        )
+        # 3. Settings (Vertical Stack)
+        sidebar_box.add(toga.Label("Run Settings:", style=Pack(margin_bottom=10, font_weight="bold", font_size=10)))
 
-        def build_field(label_text, widget, right_margin=0):
-            box = toga.Box(
-                style=Pack(direction=COLUMN, flex=1, margin_right=right_margin)
-            )
-            label = toga.Label(
-                label_text, style=Pack(margin_bottom=3, font_size=8, color="#666666")
-            )
-            widget.style.flex = 1
+        def build_sidebar_field(label_text, widget):
+            box = toga.Box(style=Pack(direction=COLUMN, margin_bottom=12))
+            label = toga.Label(label_text, style=Pack(margin_bottom=2, font_size=9, color="#666666"))
             box.add(label)
             box.add(widget)
             return box
 
-        row_a = toga.Box(style=Pack(direction=ROW, margin_bottom=15))
         self.mode_select = toga.Selection(items=MODES)
         self.solver_select = toga.Selection(items=SOLVERS)
-        row_a.add(build_field("SCENARIO MODE", self.mode_select, right_margin=20))
-        row_a.add(build_field("SOLVER", self.solver_select))
-
-        row_b = toga.Box(style=Pack(direction=ROW, margin_bottom=20))
         self.time_select = toga.Selection(items=TIME_SEQUENCES)
-        row_b.add(build_field("TIME SEQUENCING", self.time_select))
 
-        input_box.add(row_a)
-        input_box.add(row_b)
+        sidebar_box.add(build_sidebar_field("SCENARIO MODE", self.mode_select))
+        sidebar_box.add(build_sidebar_field("SOLVER", self.solver_select))
+        sidebar_box.add(build_sidebar_field("TIME SEQUENCING", self.time_select))
 
-        run_box = toga.Box(style=Pack(direction=ROW, align_items="center"))
+        # Spacer to push Run button to bottom
+        sidebar_box.add(toga.Box(style=Pack(flex=1)))
+
+        # 4. Run Controls
+        self.spinner = toga.ActivityIndicator(style=Pack(margin_bottom=5))
         self.btn_run = toga.Button(
             "RUN MODEL",
             on_press=self.run_model,
             enabled=False,
-            style=Pack(flex=1, height=45),
+            style=Pack(height=40, font_weight="bold")
         )
-        self.spinner = toga.ActivityIndicator(style=Pack(margin_left=15))
 
-        run_box.add(self.btn_run)
-        run_box.add(self.spinner)
-        input_box.add(run_box)
+        sidebar_box.add(self.spinner)
+        sidebar_box.add(self.btn_run)
 
+        # ==========================
+        # RIGHT CONTENT: Output Tabs
+        # ==========================
         self.content_container = toga.OptionContainer(style=Pack(flex=1))
 
+        # Tab 1: Logs
         self.log_view = toga.MultilineTextInput(
             readonly=True, style=Pack(flex=1, font_family="monospace")
         )
 
-        # Tab 2: Visual Report (starts with placeholder)
+        # Tab 2: Visual Report
         self.report_webview = toga.WebView(
             url="https://temoaproject.org", style=Pack(flex=1)
         )
@@ -258,25 +251,14 @@ class TemoaGUI(toga.App):
             url="https://temoaproject.org", style=Pack(flex=1)
         )
 
-        # Navigation for Database Inspector
+        # DB Nav Bar
         nav_box = toga.Box(
             style=Pack(direction=ROW, margin_bottom=5, align_items="center")
         )
-        self.btn_back = toga.Button(
-            "Back",
-            on_press=lambda w: self.db_webview.evaluate_javascript("history.back()"),
-            style=Pack(width=60, margin_right=5),
-        )
-        self.btn_fwd = toga.Button(
-            "Forward",
-            on_press=lambda w: self.db_webview.evaluate_javascript("history.forward()"),
-            style=Pack(width=70, margin_right=5),
-        )
-        self.btn_reload = toga.Button(
-            "Reload",
-            on_press=lambda w: self.db_webview.evaluate_javascript("location.reload()"),
-            style=Pack(width=70),
-        )
+        self.btn_back = toga.Button("Back", on_press=lambda w: self.db_webview.evaluate_javascript("history.back()"), style=Pack(width=60, margin_right=5))
+        self.btn_fwd = toga.Button("Fwd", on_press=lambda w: self.db_webview.evaluate_javascript("history.forward()"), style=Pack(width=60, margin_right=5))
+        self.btn_reload = toga.Button("Reload", on_press=lambda w: self.db_webview.evaluate_javascript("location.reload()"), style=Pack(width=70))
+
         nav_box.add(self.btn_back)
         nav_box.add(self.btn_fwd)
         nav_box.add(self.btn_reload)
@@ -286,23 +268,25 @@ class TemoaGUI(toga.App):
         db_container.add(self.db_webview)
 
         self.content_container.content.append(toga.OptionItem("Logs", self.log_view))
-        self.content_container.content.append(
-            toga.OptionItem("Visual Report", self.report_webview)
-        )
-        self.content_container.content.append(
-            toga.OptionItem("Database Inspector", db_container)
-        )
+        self.content_container.content.append(toga.OptionItem("Visual Report", self.report_webview))
+        self.content_container.content.append(toga.OptionItem("Database Inspector", db_container))
 
-        main_box = toga.Box(style=Pack(direction=COLUMN))
-        main_box.add(input_box)
-        main_box.add(self.content_container)
+        # ==========================
+        # ROOT: Split Container
+        # ==========================
+        # SplitContainer holds [Left, Right].
+        # We give the sidebar a fixed initial weight to control width.
+        split = toga.SplitContainer(content=[sidebar_box, self.content_container])
+
+        # Initial sizing is tricky in Toga cross-platform, but setting direction helps.
+        # Note: Toga SplitContainer defaults to 50/50 split usually.
+        # User can resize or collapse it manually.
 
         self.main_window = toga.MainWindow(title=self.formal_name)
-        self.main_window.content = main_box
+        self.main_window.content = split
         self.main_window.show()
 
     # --- Actions ---
-
     async def select_file(self, widget):
         try:
             fname = await self.main_window.dialog(
@@ -451,7 +435,6 @@ class TemoaGUI(toga.App):
             svg_files = list(output_path.glob("*.svg"))
 
             try:
-                # Start serving the output directory
                 server_url = self.static_server.start(output_path)
 
                 target_file = None
@@ -463,7 +446,6 @@ class TemoaGUI(toga.App):
                 if target_file:
                     full_url = f"{server_url}/{target_file}"
                     self.log_view.value += f"Loading report at: {full_url}\n"
-                    # Load the URL directly
                     self.report_webview.url = full_url
                     self.content_container.current_tab = 1
                 else:
