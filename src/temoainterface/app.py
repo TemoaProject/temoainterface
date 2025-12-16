@@ -2,6 +2,9 @@ import os
 import sys
 import socket
 import contextlib
+import http.server
+import socketserver
+import threading
 
 # --- CRITICAL LINUX FIX ---
 if os.name == "posix":
@@ -62,17 +65,16 @@ def find_free_port():
         return s.getsockname()[1]
 
 
-# --- Datasette Manager ---
-class DatasetteServer:
-    """Manages a background Datasette instance for the GUI."""
+# --- Servers ---
 
+class DatasetteServer:
+    """Manages a background Datasette instance."""
     def __init__(self):
         self.server_task = None
         self.port = None
         self.running = False
 
     async def start(self, db_path: Path):
-        """Starts Datasette serving the given database file."""
         if self.running:
             return f"http://127.0.0.1:{self.port}"
 
@@ -80,21 +82,57 @@ class DatasetteServer:
         self.running = True
 
         ds = Datasette(files=[str(db_path)], immutables=[], settings={"base_url": "/"})
-
         import uvicorn
-
         config = uvicorn.Config(
             ds.app(), host="127.0.0.1", port=self.port, log_level="error"
         )
         server = uvicorn.Server(config)
-
         self.server_task = asyncio.create_task(server.serve())
         await asyncio.sleep(0.5)
+        return f"http://127.0.0.1:{self.port}"
+
+class StaticFileServer:
+    """Serves the output directory over HTTP to avoid file:// protocol issues."""
+    def __init__(self):
+        self.server = None
+        self.thread = None
+        self.port = None
+        self.root_dir = None
+
+    def start(self, root_dir: Path):
+        # If we are already serving this exact dir, return existing URL
+        if self.server and self.root_dir == root_dir:
+             return f"http://127.0.0.1:{self.port}"
+
+        # Stop previous server if it exists
+        if self.server:
+            self.stop()
+
+        self.root_dir = root_dir
+        self.port = find_free_port()
+
+        # Define a handler that serves the specific directory silently
+        class Handler(http.server.SimpleHTTPRequestHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, directory=str(root_dir), **kwargs)
+            def log_message(self, format, *args):
+                pass # Silence console logs
+
+        self.server = socketserver.TCPServer(("127.0.0.1", self.port), Handler)
+
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
 
         return f"http://127.0.0.1:{self.port}"
 
+    def stop(self):
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
 
-# --- Custom Logging & Stream Handler ---
+
+# --- Logging ---
 class TogaLogHandler(logging.Handler):
     def __init__(self, app, log_widget):
         super().__init__()
@@ -114,15 +152,13 @@ class TogaLogHandler(logging.Handler):
 
 
 class StreamRedirector:
-    """Redirects stdout/stderr writes to the Toga log widget."""
-
     def __init__(self, app, log_widget, prefix=""):
         self.app = app
         self.log_widget = log_widget
         self.prefix = prefix
 
     def write(self, text):
-        if text.strip():  # Avoid logging empty newlines aggressively
+        if text.strip():
             self.app.loop.call_soon_threadsafe(self._append, f"{self.prefix}{text}")
 
     def flush(self):
@@ -139,11 +175,11 @@ class TemoaGUI(toga.App):
         self.source_path: Path | None = None
         self.toml_doc: tomlkit.TOMLDocument | None = None
         self.ds_server = DatasetteServer()
+        self.static_server = StaticFileServer() # NEW: Static server
 
         # --- UI Layout ---
         input_box = toga.Box(style=Pack(direction=COLUMN, margin=15))
 
-        # 1. File Selection
         file_row = toga.Box(style=Pack(direction=ROW, margin_bottom=15))
         self.path_input = toga.TextInput(
             readonly=True,
@@ -168,7 +204,6 @@ class TemoaGUI(toga.App):
             )
         )
 
-        # 2. Configuration Grid
         def build_field(label_text, widget, right_margin=0):
             box = toga.Box(
                 style=Pack(direction=COLUMN, flex=1, margin_right=right_margin)
@@ -194,7 +229,6 @@ class TemoaGUI(toga.App):
         input_box.add(row_a)
         input_box.add(row_b)
 
-        # Run Button Area
         run_box = toga.Box(style=Pack(direction=ROW, align_items="center"))
         self.btn_run = toga.Button(
             "RUN MODEL",
@@ -208,15 +242,13 @@ class TemoaGUI(toga.App):
         run_box.add(self.spinner)
         input_box.add(run_box)
 
-        # 3. Output Tabs
         self.content_container = toga.OptionContainer(style=Pack(flex=1))
 
-        # Tab 1: Logs
         self.log_view = toga.MultilineTextInput(
             readonly=True, style=Pack(flex=1, font_family="monospace")
         )
 
-        # Tab 2: Visual Report
+        # Tab 2: Visual Report (starts with placeholder)
         self.report_webview = toga.WebView(
             url="https://temoaproject.org", style=Pack(flex=1)
         )
@@ -226,28 +258,25 @@ class TemoaGUI(toga.App):
             url="https://temoaproject.org", style=Pack(flex=1)
         )
 
+        # Navigation for Database Inspector
         nav_box = toga.Box(
             style=Pack(direction=ROW, margin_bottom=5, align_items="center")
         )
-
         self.btn_back = toga.Button(
             "Back",
             on_press=lambda w: self.db_webview.evaluate_javascript("history.back()"),
             style=Pack(width=60, margin_right=5),
         )
-
         self.btn_fwd = toga.Button(
             "Forward",
             on_press=lambda w: self.db_webview.evaluate_javascript("history.forward()"),
             style=Pack(width=70, margin_right=5),
         )
-
         self.btn_reload = toga.Button(
             "Reload",
             on_press=lambda w: self.db_webview.evaluate_javascript("location.reload()"),
             style=Pack(width=70),
         )
-
         nav_box.add(self.btn_back)
         nav_box.add(self.btn_fwd)
         nav_box.add(self.btn_reload)
@@ -264,7 +293,6 @@ class TemoaGUI(toga.App):
             toga.OptionItem("Database Inspector", db_container)
         )
 
-        # Main Window
         main_box = toga.Box(style=Pack(direction=COLUMN))
         main_box.add(input_box)
         main_box.add(self.content_container)
@@ -343,7 +371,6 @@ class TemoaGUI(toga.App):
         await asyncio.to_thread(self._execute_temoa_logic)
 
     def _execute_temoa_logic(self):
-        # FIX FOR WINDOWS: Redirect stderr/stdout so they aren't None
         original_stdout = sys.stdout
         original_stderr = sys.stderr
 
@@ -396,12 +423,10 @@ class TemoaGUI(toga.App):
 
         except Exception:
             import traceback
-
             tb = traceback.format_exc()
             self.app.loop.call_soon_threadsafe(self._append_log, f"\nERROR:\n{tb}\n")
 
         finally:
-            # RESTORE STREAMS and Handlers
             sys.stdout = original_stdout
             sys.stderr = original_stderr
             root_logger.removeHandler(gui_handler)
@@ -421,31 +446,31 @@ class TemoaGUI(toga.App):
         if success and output_path:
             self.log_view.value += "\n✅ Optimization Complete.\n"
 
-            # 1. Handle Visual Report (SVG/HTML)
+            # 1. Handle Visual Report via Static Server
             html_files = list(output_path.glob("*.html"))
             svg_files = list(output_path.glob("*.svg"))
 
-            if html_files:
-                try:
-                    content = html_files[0].read_text(encoding="utf-8")
-                    self.report_webview.set_content(
-                        f"file://{html_files[0].absolute()}", content
-                    )
+            try:
+                # Start serving the output directory
+                server_url = self.static_server.start(output_path)
+
+                target_file = None
+                if html_files:
+                    target_file = html_files[0].name
+                elif svg_files:
+                    target_file = svg_files[0].name
+
+                if target_file:
+                    full_url = f"{server_url}/{target_file}"
+                    self.log_view.value += f"Loading report at: {full_url}\n"
+                    # Load the URL directly
+                    self.report_webview.url = full_url
                     self.content_container.current_tab = 1
-                except Exception as e:
-                    self.log_view.value += f"\nError loading HTML content: {e}"
-            elif svg_files:
-                try:
-                    svg_content = svg_files[0].read_text(encoding="utf-8")
-                    html_wrapper = f"<html><body>{svg_content}</body></html>"
-                    self.report_webview.set_content(
-                        f"file://{svg_files[0].absolute()}", html_wrapper
-                    )
-                    self.content_container.current_tab = 1
-                except Exception as e:
-                    self.log_view.value += f"\nError loading SVG content: {e}"
-            else:
-                self.log_view.value += "No visual report found in output directory."
+                else:
+                    self.log_view.value += "No visual report file found in output."
+
+            except Exception as e:
+                self.log_view.value += f"\nError starting report server: {e}"
 
             # 2. Handle Database Inspector
             sqlite_files = list(output_path.glob("*.sqlite"))
